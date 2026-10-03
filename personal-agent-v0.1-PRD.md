@@ -782,7 +782,7 @@ SEARCH_API_KEY
 
 ## 19. 用户界面
 
-v0.1 优先采用 CLI。
+v0.1 以 CLI 为主。
 
 示例：
 
@@ -809,7 +809,7 @@ Assistant:
 
 CLI 最有利于观察 Agent 内部执行过程。
 
-Web UI 放在后续版本。
+同时提供一个实验性 Web UI（`web/`）：浏览器对话页面 + 最近一次请求的结构化 Trace 面板，复用同一个 AgentRuntime。Trace 数据来自 Runtime 发出的结构化事件，CLI 和 Web 只是两种订阅者。
 
 ---
 

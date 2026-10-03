@@ -11,6 +11,16 @@ SYSTEM_PROMPT = (
 )
 
 
+def cli_trace(event: dict) -> None:
+    if event["type"] == "tool_call":
+        args = event["arguments"][:200]
+        print(f"[step {event['step']}] {event['tool']}({args})")
+    elif event["type"] == "tool_result":
+        print(f"[tool] result: {event['result'][:200]}")
+    elif event["type"] == "stop":
+        print(f"[stop] 达到最大步数 {event['max_steps']}")
+
+
 def main():
     settings = load_settings()
     llm = LLMClient(
@@ -24,7 +34,11 @@ def main():
     registry.register(web.web_fetch)
     registry.register(local_file.make_tool(settings.workspace_dir))
     agent = AgentRuntime(
-        llm, registry, system_prompt=SYSTEM_PROMPT, max_steps=settings.max_steps
+        llm,
+        registry,
+        system_prompt=SYSTEM_PROMPT,
+        max_steps=settings.max_steps,
+        on_event=cli_trace,
     )
 
     print("Personal Agent v0.1（输入 exit 退出）\n")

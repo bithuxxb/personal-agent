@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Personal Agent v0.1</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #2a2f3a;
+    --text: #e6e8ec;
+    --dim: #9aa3b2;
+    --accent: #4f8cff;
+    --tool: #d9a13b;
+    --ok: #4caf7d;
+    --err: #e05d5d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+    font-size: 1rem;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    padding: 0.75rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+    font-weight: 600;
+  }
+  header span { color: var(--dim); font-weight: 400; font-size: 0.85rem; margin-inline-start: 0.5rem; }
+  main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    min-height: 0;
+  }
+  .pane {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .pane + .pane { border-inline-start: 1px solid var(--border); }
+  .pane-title {
+    padding: 0.5rem 1rem;
+    font-size: 0.8rem;
+    color: var(--dim);
+    border-bottom: 1px solid var(--border);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .scroll { flex: 1; overflow-y: auto; padding: 1rem; }
+  .msg { margin-bottom: 1rem; max-width: 90%; }
+  .msg .who { font-size: 0.75rem; color: var(--dim); margin-bottom: 0.25rem; }
+  .msg .body {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    padding: 0.6rem 0.8rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.55;
+  }
+  .msg.user { margin-inline-start: auto; }
+  .msg.user .body { background: #1c2637; border-color: #2c3a52; }
+  .event {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8rem;
+    padding: 0.45rem 0.6rem;
+    border-inline-start: 3px solid var(--border);
+    margin-bottom: 0.4rem;
+    background: var(--panel);
+    border-radius: 0 0.35rem 0.35rem 0;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .event.tool_call { border-color: var(--tool); }
+  .event.tool_result { border-color: var(--accent); }
+  .event.final { border-color: var(--ok); }
+  .event.stop, .event.error { border-color: var(--err); }
+  .event .tag { color: var(--dim); margin-inline-end: 0.5em; }
+  form {
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    border-top: 1px solid var(--border);
+  }
+  label { position: absolute; left: -9999px; }
+  input {
+    flex: 1;
+    font-size: 1rem;
+    padding: 0.6rem 0.8rem;
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+  }
+  input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button {
+    font-size: 1rem;
+    padding: 0.6rem 1.2rem;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 0.5rem;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: wait; }
+  @media (max-width: 800px) {
+    main { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+    .pane + .pane { border-inline-start: none; border-top: 1px solid var(--border); }
+  }
+</style>
+</head>
+<body>
+<header>Personal Agent<span>v0.1 · Web UI（实验性，CLI 仍是主界面）</span></header>
+<main>
+  <section class="pane" aria-label="对话">
+    <div class="pane-title">对话</div>
+    <div class="scroll" id="chat"></div>
+    <form id="form" action="/api/chat" method="POST">
+      <label for="msg">消息</label>
+      <input id="msg" name="message" autocomplete="off" required placeholder="问点什么…">
+      <button type="submit" id="send">发送</button>
+    </form>
+  </section>
+  <section class="pane" aria-label="执行 Trace">
+    <div class="pane-title">Trace（最近一次请求）</div>
+    <div class="scroll" id="trace"></div>
+  </section>
+</main>
+<script>
+const chat = document.getElementById('chat');
+const tracePane = document.getElementById('trace');
+const form = document.getElementById('form');
+const input = document.getElementById('msg');
+const sendBtn = document.getElementById('send');
+
+function addMsg(who, text) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + (who === '你' ? 'user' : 'agent');
+  const whoEl = document.createElement('div');
+  whoEl.className = 'who';
+  whoEl.textContent = who;
+  const body = document.createElement('div');
+  body.className = 'body';
+  body.textContent = text;
+  div.append(whoEl, body);
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function renderTrace(trace) {
+  tracePane.textContent = '';
+  for (const ev of trace.events) {
+    const div = document.createElement('div');
+    div.className = 'event ' + ev.type;
+    const tag = document.createElement('span');
+    tag.className = 'tag';
+    tag.textContent = ev.step ? `step ${ev.step} · ${ev.type}` : ev.type;
+    const body = document.createElement('span');
+    if (ev.type === 'request') body.textContent = ev.user_input;
+    else if (ev.type === 'llm') body.textContent = `latency ${ev.latency}s · tool_call=${ev.tool_call}`;
+    else if (ev.type === 'tool_call') body.textContent = `${ev.tool}(${ev.arguments})`;
+    else if (ev.type === 'tool_result') body.textContent = `${ev.success ? 'ok' : 'FAIL'}: ${ev.result}`;
+    else if (ev.type === 'final') body.textContent = ev.answer;
+    else if (ev.type === 'stop') body.textContent = `达到最大步数 ${ev.max_steps}`;
+    else body.textContent = ev.message || JSON.stringify(ev);
+    div.append(tag, body);
+    tracePane.appendChild(div);
+  }
+  tracePane.scrollTop = tracePane.scrollHeight;
+}
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const message = input.value.trim();
+  if (!message) return;
+  addMsg('你', message);
+  input.value = '';
+  sendBtn.disabled = true;
+  try {
+    const resp = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message }),
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    addMsg('Agent', data.answer);
+    renderTrace(data.trace);
+  } catch (err) {
+    addMsg('Agent', '请求失败: ' + err.message);
+  } finally {
+    sendBtn.disabled = false;
+    input.focus();
+  }
+});
+</script>
+</body>
+</html>
