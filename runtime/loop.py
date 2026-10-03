@@ -1,5 +1,7 @@
 import json
 import time
+import uuid
+from datetime import datetime
 
 from tools.base import ToolResult
 
@@ -8,7 +10,10 @@ MAX_CONTEXT_MESSAGES = 40
 
 class AgentRuntime:
     """PRD §7。tool calling 循环 + MAX_STEPS + context 截断；
-    trace 以结构化事件发出，CLI/Web 各自订阅。"""
+    trace 以结构化事件发出，CLI/Web 各自订阅。
+    事件字段覆盖 PRD §15：request_id / timestamp / user_input / model /
+    step / tool_name / tool_arguments / tool_result / latency / token_usage /
+    error / final_response。"""
 
     def __init__(self, llm, registry, system_prompt: str, max_steps: int = 8, on_event=None):
         self.llm = llm
@@ -16,9 +21,21 @@ class AgentRuntime:
         self.max_steps = max_steps
         self.on_event = on_event or (lambda event: None)
         self.messages = [{"role": "system", "content": system_prompt}]
+        self._request_id: str | None = None
+        # LLM 重试也纳入 trace（§16 的重试过程可观察）
+        if hasattr(llm, "on_retry"):
+            llm.on_retry = self._on_llm_retry
 
     def _emit(self, **event):
+        event.setdefault("request_id", self._request_id)
         self.on_event(event)
+
+    def _on_llm_retry(self, attempt: int, exc: Exception):
+        self._emit(
+            type="llm_retry",
+            attempt=attempt,
+            error={"type": type(exc).__name__, "message": str(exc)},
+        )
 
     def _trim_context(self):
         """PRD §13：简单截断。硬性规则——不得把 tool_call 和它的 tool_result 切断，
@@ -30,22 +47,41 @@ class AgentRuntime:
             self._emit(type="context_trim", remaining=len(self.messages))
 
     def ask(self, user_input: str) -> str:
-        self._emit(type="request", user_input=user_input)
+        self._request_id = uuid.uuid4().hex[:8]
+        self._emit(
+            type="request",
+            timestamp=datetime.now().isoformat(timespec="seconds"),
+            user_input=user_input,
+            model=getattr(self.llm, "model", None),
+        )
         self.messages.append({"role": "user", "content": user_input})
         tools_used: list[str] = []
+        token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         step = 0
         while step < self.max_steps:
             step += 1
             self._trim_context()
             start = time.monotonic()
-            msg, usage = self.llm.generate(
-                self.messages, tools=self.registry.schemas() or None
-            )
+            try:
+                msg, usage = self.llm.generate(
+                    self.messages, tools=self.registry.schemas() or None
+                )
+            except Exception as exc:
+                self._emit(
+                    type="error",
+                    step=step,
+                    error={"type": type(exc).__name__, "message": str(exc)},
+                )
+                raise
             latency = round(time.monotonic() - start, 3)
+            if usage:
+                for key in token_usage:
+                    token_usage[key] += usage.get(key, 0)
             tool_calls = getattr(msg, "tool_calls", None)
             self._emit(
                 type="llm",
                 step=step,
+                model=getattr(self.llm, "model", None),
                 latency=latency,
                 tool_call=bool(tool_calls),
                 usage=usage,
@@ -53,7 +89,7 @@ class AgentRuntime:
             if not tool_calls:
                 answer = msg.content or ""
                 self.messages.append({"role": "assistant", "content": answer})
-                self._emit(type="final", answer=answer)
+                self._emit(type="final", step=step, answer=answer, token_usage=token_usage)
                 return answer
 
             self.messages.append(msg.model_dump(exclude_none=True))

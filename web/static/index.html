@@ -82,7 +82,7 @@
   .event.tool_call { border-color: var(--tool); }
   .event.tool_result { border-color: var(--accent); }
   .event.final { border-color: var(--ok); }
-  .event.stop, .event.error { border-color: var(--err); }
+  .event.stop, .event.error, .event.llm_retry { border-color: var(--err); }
   .event .tag { color: var(--dim); margin-inline-end: 0.5em; }
   form {
     display: flex;
@@ -164,13 +164,15 @@ function renderTrace(trace) {
     tag.className = 'tag';
     tag.textContent = ev.step ? `step ${ev.step} · ${ev.type}` : ev.type;
     const body = document.createElement('span');
-    if (ev.type === 'request') body.textContent = ev.user_input;
+    if (ev.type === 'request') body.textContent = `#${ev.request_id} · ${ev.timestamp} · ${ev.user_input}`;
     else if (ev.type === 'llm') body.textContent = `latency ${ev.latency}s · tool_call=${ev.tool_call}` + (ev.usage ? ` · tokens ${ev.usage.total_tokens}` : '');
+    else if (ev.type === 'llm_retry') body.textContent = `LLM 第 ${ev.attempt} 次失败（${ev.error.type}），退避重试`;
     else if (ev.type === 'tool_call') body.textContent = `${ev.tool}(${ev.arguments})`;
     else if (ev.type === 'tool_result') body.textContent = `${ev.success ? 'ok' : 'FAIL'}: ${ev.result}`;
     else if (ev.type === 'context_trim') body.textContent = `历史过长已截断，剩余 ${ev.remaining} 条`;
-    else if (ev.type === 'final') body.textContent = ev.answer;
+    else if (ev.type === 'final') body.textContent = ev.answer + (ev.token_usage ? `\ntokens: ${ev.token_usage.total_tokens}` : '');
     else if (ev.type === 'stop') body.textContent = `达到最大步数 ${ev.max_steps}`;
+    else if (ev.type === 'error') body.textContent = `${ev.error.type}: ${ev.error.message}`;
     else body.textContent = ev.message || JSON.stringify(ev);
     div.append(tag, body);
     tracePane.appendChild(div);

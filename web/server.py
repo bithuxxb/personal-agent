@@ -1,5 +1,3 @@
-import time
-import uuid
 from collections import deque
 from pathlib import Path
 
@@ -56,10 +54,16 @@ def chat(req: ChatRequest):
         answer = agent.ask(req.message)
     except Exception as exc:
         answer = f"出错: {exc}"
-        events.append({"type": "error", "message": str(exc)})
+        if not any(e["type"] == "error" for e in events):
+            events.append({
+                "type": "error",
+                "error": {"type": type(exc).__name__, "message": str(exc)},
+            })
+    req_event = next((e for e in events if e["type"] == "request"), {})
     trace = {
-        "request_id": uuid.uuid4().hex[:8],
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "request_id": req_event.get("request_id"),
+        "timestamp": req_event.get("timestamp"),
+        "model": req_event.get("model"),
         "user_input": req.message,
         "answer": answer,
         "events": events,

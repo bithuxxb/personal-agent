@@ -219,5 +219,116 @@ check("SSRF: file:// 拒绝", not web.web_fetch.execute({"url": "file:///etc/pas
 check("SSRF: 内网 IP 拒绝", not web.web_fetch.execute({"url": "http://192.168.1.1/"}).success)
 check("SSRF: metadata 地址拒绝", not web.web_fetch.execute({"url": "http://169.254.169.254/"}).success)
 
+# --- Trace 字段完整性（PRD §15）---
+agent, events = make_agent(
+    ScriptLLM([
+        FakeMessage(tool_calls=[FakeCall("read_file", '{"path": "test.md"}')]),
+        FakeMessage(content="总结完毕"),
+    ]),
+    workspace=ws,
+)
+agent.ask("读一下 test.md")
+req_ev = next(e for e in events if e["type"] == "request")
+check(
+    "Trace: request 含 request_id/timestamp/user_input/model",
+    all(k in req_ev for k in ("request_id", "timestamp", "user_input", "model"))
+    and req_ev["user_input"] == "读一下 test.md",
+)
+llm_evs = [e for e in events if e["type"] == "llm"]
+check(
+    "Trace: llm 事件含 step/model/latency/usage",
+    len(llm_evs) == 2
+    and all(all(k in e for k in ("step", "model", "latency", "usage")) for e in llm_evs),
+)
+check(
+    "Trace: 所有事件带同一 request_id",
+    all(e.get("request_id") == req_ev["request_id"] for e in events),
+)
+tool_ev = next(e for e in events if e["type"] == "tool_call")
+check(
+    "Trace: tool_call 含 step/tool_name/arguments",
+    all(k in tool_ev for k in ("step", "tool", "arguments")),
+)
+final_ev = next(e for e in events if e["type"] == "final")
+check(
+    "Trace: final 含 answer 和累计 token_usage",
+    final_ev["answer"] == "总结完毕" and "token_usage" in final_ev,
+)
+
+# --- LLM 错误结构化入 Trace（§15 error 字段）---
+class FailLLM:
+    model = "fail-model"
+
+    def generate(self, messages, tools=None):
+        raise RuntimeError("api 炸了")
+
+agent, events = make_agent(FailLLM())
+try:
+    agent.ask("x")
+    raised = False
+except RuntimeError:
+    raised = True
+err_ev = next((e for e in events if e["type"] == "error"), None)
+check(
+    "Trace: LLM 异常产生 error 事件后继续上抛",
+    raised
+    and err_ev is not None
+    and err_ev["error"]["type"] == "RuntimeError"
+    and err_ev["step"] == 1
+    and err_ev.get("request_id"),
+)
+
+# --- LLM 重试可观察（§16 重试过程入 Trace）---
+from unittest.mock import patch
+
+import httpx
+from openai import RateLimitError
+
+from llm.client import LLMClient
+
+client = LLMClient(api_key="k", model="m")
+retries = []
+client.on_retry = lambda attempt, exc: retries.append((attempt, type(exc).__name__))
+rl_err = RateLimitError(
+    "rate limited",
+    response=httpx.Response(429, request=httpx.Request("POST", "http://x")),
+    body=None,
+)
+
+
+class FlakyCompletions:
+    def __init__(self):
+        self.calls = 0
+
+    def create(self, **kwargs):
+        self.calls += 1
+        if self.calls <= 2:
+            raise rl_err
+        return type(
+            "Resp",
+            (),
+            {
+                "usage": None,
+                "choices": [type("C", (), {"message": FakeMessage(content="ok")})()],
+            },
+        )()
+
+
+client._client = type(
+    "C", (), {"chat": type("Ch", (), {"completions": FlakyCompletions()})()}
+)()
+with patch("llm.client.time.sleep"):
+    msg, _ = client.generate([{"role": "user", "content": "x"}])
+check(
+    "LLM 重试两次后成功且回调可观察",
+    msg.content == "ok" and retries == [(1, "RateLimitError"), (2, "RateLimitError")],
+    f"retries={retries}",
+)
+
+# Runtime 自动接管 LLMClient 的 on_retry，汇入统一事件流
+client2 = LLMClient(api_key="k", model="m")
+agent, events = make_agent(client2)
+check("Runtime 接管 llm.on_retry", client2.on_retry is not None)
+
 print(f"\n{len(PASSED)} passed, {len(FAILED)} failed")
 sys.exit(1 if FAILED else 0)
