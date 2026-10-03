@@ -414,6 +414,7 @@ registry.execute(
 - 非 HTML 内容
 - 请求失败
 - 重定向
+- 正文精简：跳过样板元素（nav/footer/script 等）、按链接密度丢弃导航块（通用规则，不写死特定网站）、长重复行去重
 
 ---
 
@@ -893,7 +894,7 @@ v0.1 完成。
 
 系统需要通过以下测试。
 
-所有测试以 Trace 记录为判定依据。Test 1、2 靠真实模型人工核对；Test 3–7 及路径逃逸、协议边角已实现为自动化契约测试（mock LLM）：`.venv/bin/python tests/acceptance.py`。
+所有测试以 Trace 记录为判定依据。Test 1、2 靠真实模型人工核对；Test 3–7 及路径逃逸、协议边角、参数校验、正文抽取、日期注入等已实现为自动化契约测试（mock LLM）：`.venv/bin/python tests/acceptance.py`。
 
 ### Test 1
 

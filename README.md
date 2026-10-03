@@ -8,10 +8,12 @@
 
 - 多轮对话（DeepSeek / OpenAI，OpenAI 兼容协议任意切换）
 - Tool Calling 循环：模型自主判断并连续调用多个工具，带 MAX_STEPS 保护
-- 内置工具：`calculator`、`web_search`（DuckDuckGo，免 Key）、`web_fetch`（SSRF 防护）、`read_file`（目录白名单）
-- 结构化 Trace：每次请求的完整执行过程（工具调用、延迟、token 用量）
+- 内置工具：`calculator`、`web_search`（DuckDuckGo，免 Key）、`web_fetch`（SSRF 防护 + 正文精简：链接密度过滤、长行去重）、`read_file`（目录白名单）
+- 工具参数按 JSON Schema 运行时校验（PRD §9 `validate()`）
+- 时效性保障：system prompt 每次请求注入真实日期时间，不依赖模型知识截止日期
+- 结构化 Trace：request_id、工具调用、延迟、token 用量、重试与错误事件全链路记录
 - 双界面：CLI + 实验性 Web UI（对话 + Trace 面板）
-- 19 项自动化验收测试（mock LLM，确定性可重复）
+- 41 项自动化验收测试（mock LLM，确定性可重复）
 
 ## 快速开始
 
@@ -41,7 +43,7 @@ main.py            CLI 入口
 start.sh           启动脚本（web / cli）
 config.py          环境变量配置
 llm/client.py      统一 LLM 调用入口（重试、token 统计）
-runtime/loop.py    Agent Runtime：tool calling 循环、MAX_STEPS、context 截断
+runtime/loop.py    Agent Runtime：tool calling 循环、MAX_STEPS、context 截断、日期注入
 tools/             工具系统：base（Tool/ToolResult）、registry（权限校验）、四个工具
 web/server.py      FastAPI 服务（/api/chat、/api/traces）
 web/static/        Web UI 单页
