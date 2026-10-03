@@ -771,7 +771,11 @@ SEARCH_API_KEY
 
 不得将 API Key 写入代码。
 
-注：搜索服务提供商（Tavily / SerpAPI / Bing 等）尚未选型，需在 v0.1 开发前确定。web_search 的实现应通过适配层隔离具体提供商，便于日后切换。
+技术选型（已确定）：
+
+- 语言：Python
+- 首个 LLM：OpenAI（Agents SDK 对比重写的前提）
+- 搜索：初期用 DuckDuckGo（免费、无需 Key）；web_search 通过适配层隔离提供商，日后可换 Tavily 等付费服务
 
 ---
 
@@ -1010,6 +1014,8 @@ Trace 中依次出现 web_search 和 web_fetch，且最终回答综合了两次�
 - 自研 Runtime
 
 是否需要引入更高级 Agent Framework。
+
+已确定的方向：v0.1 自研 Runtime 跑通后，用 OpenAI Agents SDK 重写一版做对比，亲身体验框架封装了什么、代价是什么。
 
 ---
 
