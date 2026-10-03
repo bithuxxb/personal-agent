@@ -1,8 +1,10 @@
 from config import load_settings
 from llm.client import LLMClient
 from runtime.loop import AgentRuntime
+from tools import calculator
+from tools.registry import ToolRegistry
 
-SYSTEM_PROMPT = "你是一个个人技术助手，回答简洁准确。"
+SYSTEM_PROMPT = "你是一个个人技术助手，回答简洁准确。需要计算时使用 calculator 工具。"
 
 
 def main():
@@ -12,7 +14,11 @@ def main():
         model=settings.model,
         base_url=settings.base_url,
     )
-    agent = AgentRuntime(llm, system_prompt=SYSTEM_PROMPT)
+    registry = ToolRegistry()
+    registry.register(calculator.tool)
+    agent = AgentRuntime(
+        llm, registry, system_prompt=SYSTEM_PROMPT, max_steps=settings.max_steps
+    )
 
     print("Personal Agent v0.1（输入 exit 退出）\n")
     while True:
