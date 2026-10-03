@@ -368,5 +368,57 @@ check(
     refreshed.count("当前日期时间") == 1 and refreshed.count("测试") == 1,
 )
 
+# --- web_fetch 正文抽取精简 ---
+from tools.web import _TextExtractor
+
+html = """<html><head><title>t</title><style>x{}</style></head><body>
+<nav>首页 城市列表 全国 北京 上海 广州</nav>
+<script>var junk = 1;</script>
+<main><h1>上海天气</h1><p>小雨转阴</p><p>17℃ ~ 22℃</p></main>
+<aside>广告位 推荐阅读</aside>
+<footer>备案信息 友情链接 关于我们</footer>
+</body></html>"""
+ex = _TextExtractor()
+ex.feed(html)
+text = ex.text()
+check(
+    "正文抽取: 跳过 nav/footer/aside/script 样板",
+    all(j not in text for j in ("城市列表", "备案信息", "广告位", "junk")),
+)
+check("正文抽取: 保留主体内容", "上海天气" in text and "小雨转阴" in text)
+check("正文抽取: 无连续空行", "\n\n" not in text)
+
+ex2 = _TextExtractor()
+ex2.feed(
+    "<html><body>"
+    "<div><a>北京</a> <a>上海</a> <a>广州</a> <a>深圳</a> <a>杭州</a></div>"
+    "<p>明天小雨转阴，气温17到22度，出门记得带伞。</p>"
+    "</body></html>"
+)
+t2 = ex2.text()
+check(
+    "正文抽取: 高链接密度导航块被通用丢弃（不写死网站）",
+    "北京" not in t2 and "小雨转阴" in t2,
+)
+
+ex3 = _TextExtractor()
+ex3.feed("<html><body><p>详见<a>这份报告</a>，明天小雨转阴，气温17到22度。</p></body></html>")
+check("正文抽取: 含少量链接的正文不误杀", "小雨转阴" in ex3.text())
+
+# --- 参数 schema 校验（PRD §9 validate / §10 参数校验）---
+from tools import calculator as calc_mod
+
+r = calc_mod.tool.execute({})
+check("schema: 缺少必填参数被拒", not r.success and "缺少必填参数" in r.error["message"])
+
+r = calc_mod.tool.execute({"expression": 123})
+check("schema: 类型错误被拒", not r.success and "类型错误" in r.error["message"])
+
+r = calc_mod.tool.execute({"expression": "1+1", "extra": "x"})
+check("schema: 未知参数被拒", not r.success and "未知参数" in r.error["message"])
+
+r = calc_mod.tool.execute({"expression": "1+1"})
+check("schema: 合法参数正常执行", r.success and r.data["value"] == 2)
+
 print(f"\n{len(PASSED)} passed, {len(FAILED)} failed")
 sys.exit(1 if FAILED else 0)

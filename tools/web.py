@@ -38,34 +38,81 @@ def _validate_url(url: str) -> str | None:
 
 
 class _TextExtractor(HTMLParser):
-    def __init__(self):
+    """HTML → 精简正文。
+
+    三层精简：跳过样板元素（script/style/nav/footer 等）、
+    按链接密度丢弃导航块（链接文字占比超阈值 → 整块丢弃，对任何网站通用）、
+    空白归一化（无连续空行）。
+    """
+
+    SKIP_TAGS = {"script", "style", "noscript", "nav", "header", "footer", "aside", "form"}
+    BLOCK_TAGS = {
+        "p", "div", "li", "tr", "ul", "ol", "dl", "dd", "dt",
+        "h1", "h2", "h3", "h4", "section", "table", "article", "main",
+    }
+    LINK_DENSITY_LIMIT = 0.5
+
+    def __init__(self, max_chars: int = MAX_CONTENT_CHARS * 2):
         super().__init__()
+        self.max_chars = max_chars
         self._skip = 0
+        self._link_depth = 0
         self._in_title = False
+        self._capped = False
+        self._len = 0
         self.title = ""
-        self.parts: list[str] = []
+        self._stack: list[dict] = [{"parts": [], "text": 0, "link": 0}]
 
     def handle_starttag(self, tag, attrs):
-        if tag in ("script", "style", "noscript"):
+        if tag in self.SKIP_TAGS:
             self._skip += 1
+        elif tag == "a":
+            self._link_depth += 1
         elif tag == "title":
             self._in_title = True
+        elif tag == "br":
+            self._stack[-1]["parts"].append("\n")
+        elif not self._skip and tag in self.BLOCK_TAGS:
+            self._stack.append({"parts": [], "text": 0, "link": 0})
 
     def handle_endtag(self, tag):
-        if tag in ("script", "style", "noscript") and self._skip:
+        if tag in self.SKIP_TAGS and self._skip:
             self._skip -= 1
+            return
+        if tag == "a" and self._link_depth:
+            self._link_depth -= 1
         elif tag == "title":
             self._in_title = False
-        elif tag in ("p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4"):
-            self.parts.append("\n")
+        elif not self._skip and tag in self.BLOCK_TAGS and len(self._stack) > 1:
+            scope = self._stack.pop()
+            if scope["text"] and scope["link"] / scope["text"] >= self.LINK_DENSITY_LIMIT:
+                return  # 链接密度过高 → 导航/列表样板，整块丢弃
+            parent = self._stack[-1]
+            parent["parts"].extend(scope["parts"])
+            parent["parts"].append("\n")
+            parent["text"] += scope["text"]
 
     def handle_data(self, data):
         if self._in_title:
             self.title += data.strip()
-        if not self._skip:
-            text = data.strip()
-            if text:
-                self.parts.append(text + " ")
+        if self._skip or self._capped:
+            return
+        text = " ".join(data.split())
+        if not text:
+            return
+        scope = self._stack[-1]
+        scope["parts"].append(text + " ")
+        scope["text"] += len(text)
+        if self._link_depth:
+            scope["link"] += len(text)
+        self._len += len(text)
+        if self._len > self.max_chars:
+            self._capped = True
+
+    def text(self) -> str:
+        raw = "".join(self._stack[0]["parts"])
+        lines = [ln.strip() for ln in raw.split("\n")]
+        return "\n".join(ln for ln in lines if ln)
 
 
 def _web_search(query: str) -> ToolResult:
@@ -123,7 +170,7 @@ def _web_fetch(url: str) -> ToolResult:
 
         extractor = _TextExtractor()
         extractor.feed(resp.text)
-        content = "".join(extractor.parts)
+        content = extractor.text()
         truncated = len(content) > MAX_CONTENT_CHARS
         return ToolResult(
             success=True,
