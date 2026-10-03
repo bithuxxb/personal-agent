@@ -56,7 +56,8 @@ class AgentRuntime:
         )
         self.messages.append({"role": "user", "content": user_input})
         tools_used: list[str] = []
-        token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        # 至少收到过一次 usage 才累计；全程缺失则保持 None（未知），不记为零
+        token_usage = None
         step = 0
         while step < self.max_steps:
             step += 1
@@ -75,6 +76,8 @@ class AgentRuntime:
                 raise
             latency = round(time.monotonic() - start, 3)
             if usage:
+                if token_usage is None:
+                    token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
                 for key in token_usage:
                     token_usage[key] += usage.get(key, 0)
             tool_calls = getattr(msg, "tool_calls", None)

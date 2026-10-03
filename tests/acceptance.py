@@ -59,7 +59,10 @@ class ScriptLLM:
 
     def generate(self, messages, tools=None):
         self.calls += 1
-        return self.script.pop(0), None
+        item = self.script.pop(0)
+        if isinstance(item, tuple):  # (msg, usage)
+            return item
+        return item, None
 
 
 class LoopLLM:
@@ -251,8 +254,26 @@ check(
 )
 final_ev = next(e for e in events if e["type"] == "final")
 check(
-    "Trace: final 含 answer 和累计 token_usage",
-    final_ev["answer"] == "总结完毕" and "token_usage" in final_ev,
+    "Trace: final 含 answer；usage 全程缺失时 token_usage 为 None（不记零）",
+    final_ev["answer"] == "总结完毕" and final_ev.get("token_usage") is None,
+)
+
+# usage 返回时逐步累计
+agent, events = make_agent(
+    ScriptLLM([
+        (FakeMessage(tool_calls=[FakeCall("read_file", '{"path": "test.md"}')]),
+         {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}),
+        (FakeMessage(content="done"),
+         {"prompt_tokens": 20, "completion_tokens": 5, "total_tokens": 25}),
+    ]),
+    workspace=ws,
+)
+agent.ask("读 test.md")
+final_ev = next(e for e in events if e["type"] == "final")
+check(
+    "Trace: final 累计各步 token_usage",
+    final_ev["token_usage"] == {"prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40},
+    f"实际: {final_ev.get('token_usage')}",
 )
 
 # --- LLM 错误结构化入 Trace（§15 error 字段）---
