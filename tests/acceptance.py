@@ -420,5 +420,18 @@ check("schema: 未知参数被拒", not r.success and "未知参数" in r.error[
 r = calc_mod.tool.execute({"expression": "1+1"})
 check("schema: 合法参数正常执行", r.success and r.data["value"] == 2)
 
+# --- 正文去重：长行去重、短数据行保留 ---
+ex4 = _TextExtractor()
+ex4.feed(
+    "<html><body>"
+    "<p>较易发 感冒指数 天凉，湿度大，较易感冒。</p>"
+    "<p>中雨</p><p>中雨</p>"
+    "<p>较易发 感冒指数 天凉，湿度大，较易感冒。</p>"
+    "</body></html>"
+)
+t4 = ex4.text()
+check("正文去重: 长模板行只留一次", t4.count("感冒指数") == 1)
+check("正文去重: 短数据行不误删（每日天气可相同）", t4.count("中雨") == 2)
+
 print(f"\n{len(PASSED)} passed, {len(FAILED)} failed")
 sys.exit(1 if FAILED else 0)

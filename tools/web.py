@@ -40,8 +40,9 @@ def _validate_url(url: str) -> str | None:
 class _TextExtractor(HTMLParser):
     """HTML → 精简正文。
 
-    三层精简：跳过样板元素（script/style/nav/footer 等）、
+    四层精简：跳过样板元素（script/style/nav/footer 等）、
     按链接密度丢弃导航块（链接文字占比超阈值 → 整块丢弃，对任何网站通用）、
+    长重复行去重（指数文案类模板只留第一次，短数据行如气温/风力保留）、
     空白归一化（无连续空行）。
     """
 
@@ -51,6 +52,7 @@ class _TextExtractor(HTMLParser):
         "h1", "h2", "h3", "h4", "section", "table", "article", "main",
     }
     LINK_DENSITY_LIMIT = 0.5
+    DEDUPE_MIN_CHARS = 12
 
     def __init__(self, max_chars: int = MAX_CONTENT_CHARS * 2):
         super().__init__()
@@ -111,8 +113,17 @@ class _TextExtractor(HTMLParser):
 
     def text(self) -> str:
         raw = "".join(self._stack[0]["parts"])
-        lines = [ln.strip() for ln in raw.split("\n")]
-        return "\n".join(ln for ln in lines if ln)
+        seen: set[str] = set()
+        out: list[str] = []
+        for ln in (ln.strip() for ln in raw.split("\n")):
+            if not ln:
+                continue
+            if len(ln) >= self.DEDUPE_MIN_CHARS:
+                if ln in seen:
+                    continue
+                seen.add(ln)
+            out.append(ln)
+        return "\n".join(out)
 
 
 def _web_search(query: str) -> ToolResult:
