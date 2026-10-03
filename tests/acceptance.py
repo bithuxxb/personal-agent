@@ -351,5 +351,22 @@ client2 = LLMClient(api_key="k", model="m")
 agent, events = make_agent(client2)
 check("Runtime 接管 llm.on_retry", client2.on_retry is not None)
 
+# --- 时效性：system prompt 每次请求注入真实当前日期 ---
+from datetime import datetime
+
+agent, _ = make_agent(ScriptLLM([FakeMessage(content="ok"), FakeMessage(content="ok2")]))
+agent.ask("今天有什么新闻")
+sys_msg = agent.messages[0]["content"]
+check(
+    "system prompt 含当前真实日期时间",
+    "当前日期时间" in sys_msg and str(datetime.now().year) in sys_msg,
+)
+agent.ask("再问一次")
+refreshed = agent.messages[0]["content"]
+check(
+    "每次请求刷新而非叠加（日期行不重复）",
+    refreshed.count("当前日期时间") == 1 and refreshed.count("测试") == 1,
+)
+
 print(f"\n{len(PASSED)} passed, {len(FAILED)} failed")
 sys.exit(1 if FAILED else 0)

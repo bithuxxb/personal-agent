@@ -275,7 +275,7 @@ LLM 模块负责所有模型通信。
 
 - 模型 API 调用
 - Tool Schema 注入
-- System Prompt 注入
+- System Prompt 注入（每次请求刷新当前真实日期时间，时效性判断不依赖模型知识截止日期）
 - Message 格式转换
 - Response 解析
 - Tool Call 解析

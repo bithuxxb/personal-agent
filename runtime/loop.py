@@ -20,6 +20,7 @@ class AgentRuntime:
         self.registry = registry
         self.max_steps = max_steps
         self.on_event = on_event or (lambda event: None)
+        self._system_prompt = system_prompt
         self.messages = [{"role": "system", "content": system_prompt}]
         self._request_id: str | None = None
         # LLM 重试也纳入 trace（§16 的重试过程可观察）
@@ -37,6 +38,19 @@ class AgentRuntime:
             error={"type": type(exc).__name__, "message": str(exc)},
         )
 
+    def _refresh_datetime(self):
+        """每次请求把真实当前日期时间写进 system prompt。
+        模型知识有截止日期，"今天/最近"类请求不能靠它自己推算。"""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
+        self.messages[0] = {
+            "role": "system",
+            "content": (
+                f"{self._system_prompt}\n\n"
+                f"当前日期时间：{now}。"
+                f"涉及“今天”“最近”“最新”等时效性请求时，以此日期为准生成搜索关键词。"
+            ),
+        }
+
     def _trim_context(self):
         """PRD §13：简单截断。硬性规则——不得把 tool_call 和它的 tool_result 切断，
         所以截断以消息组为单位：删除最旧一条后，若下一条是孤儿 tool 消息则一并删除。"""
@@ -48,6 +62,7 @@ class AgentRuntime:
 
     def ask(self, user_input: str) -> str:
         self._request_id = uuid.uuid4().hex[:8]
+        self._refresh_datetime()
         self._emit(
             type="request",
             timestamp=datetime.now().isoformat(timespec="seconds"),
