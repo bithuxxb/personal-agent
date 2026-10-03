@@ -1,10 +1,14 @@
 from config import load_settings
 from llm.client import LLMClient
 from runtime.loop import AgentRuntime
-from tools import calculator
+from tools import calculator, local_file, web
 from tools.registry import ToolRegistry
 
-SYSTEM_PROMPT = "你是一个个人技术助手，回答简洁准确。需要计算时使用 calculator 工具。"
+SYSTEM_PROMPT = (
+    "你是一个个人技术助手，回答简洁准确。"
+    "需要计算时用 calculator；需要实时信息时用 web_search，"
+    "需要读网页正文时用 web_fetch；需要读本地文件时用 read_file。"
+)
 
 
 def main():
@@ -16,6 +20,9 @@ def main():
     )
     registry = ToolRegistry()
     registry.register(calculator.tool)
+    registry.register(web.web_search)
+    registry.register(web.web_fetch)
+    registry.register(local_file.make_tool(settings.workspace_dir))
     agent = AgentRuntime(
         llm, registry, system_prompt=SYSTEM_PROMPT, max_steps=settings.max_steps
     )
