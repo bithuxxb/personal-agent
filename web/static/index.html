@@ -165,9 +165,10 @@ function renderTrace(trace) {
     tag.textContent = ev.step ? `step ${ev.step} · ${ev.type}` : ev.type;
     const body = document.createElement('span');
     if (ev.type === 'request') body.textContent = ev.user_input;
-    else if (ev.type === 'llm') body.textContent = `latency ${ev.latency}s · tool_call=${ev.tool_call}`;
+    else if (ev.type === 'llm') body.textContent = `latency ${ev.latency}s · tool_call=${ev.tool_call}` + (ev.usage ? ` · tokens ${ev.usage.total_tokens}` : '');
     else if (ev.type === 'tool_call') body.textContent = `${ev.tool}(${ev.arguments})`;
     else if (ev.type === 'tool_result') body.textContent = `${ev.success ? 'ok' : 'FAIL'}: ${ev.result}`;
+    else if (ev.type === 'context_trim') body.textContent = `历史过长已截断，剩余 ${ev.remaining} 条`;
     else if (ev.type === 'final') body.textContent = ev.answer;
     else if (ev.type === 'stop') body.textContent = `达到最大步数 ${ev.max_steps}`;
     else body.textContent = ev.message || JSON.stringify(ev);

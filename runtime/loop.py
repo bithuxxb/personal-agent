@@ -3,9 +3,12 @@ import time
 
 from tools.base import ToolResult
 
+MAX_CONTEXT_MESSAGES = 40
+
 
 class AgentRuntime:
-    """PRD §7。M2/M3：tool calling 循环；trace 以结构化事件发出，CLI/Web 各自订阅。"""
+    """PRD §7。tool calling 循环 + MAX_STEPS + context 截断；
+    trace 以结构化事件发出，CLI/Web 各自订阅。"""
 
     def __init__(self, llm, registry, system_prompt: str, max_steps: int = 8, on_event=None):
         self.llm = llm
@@ -17,20 +20,35 @@ class AgentRuntime:
     def _emit(self, **event):
         self.on_event(event)
 
+    def _trim_context(self):
+        """PRD §13：简单截断。硬性规则——不得把 tool_call 和它的 tool_result 切断，
+        所以截断以消息组为单位：删除最旧一条后，若下一条是孤儿 tool 消息则一并删除。"""
+        while len(self.messages) > MAX_CONTEXT_MESSAGES + 1:
+            del self.messages[1]
+            while len(self.messages) > 1 and self.messages[1].get("role") == "tool":
+                del self.messages[1]
+            self._emit(type="context_trim", remaining=len(self.messages))
+
     def ask(self, user_input: str) -> str:
         self._emit(type="request", user_input=user_input)
         self.messages.append({"role": "user", "content": user_input})
+        tools_used: list[str] = []
         step = 0
         while step < self.max_steps:
             step += 1
+            self._trim_context()
             start = time.monotonic()
-            msg = self.llm.generate(
+            msg, usage = self.llm.generate(
                 self.messages, tools=self.registry.schemas() or None
             )
             latency = round(time.monotonic() - start, 3)
             tool_calls = getattr(msg, "tool_calls", None)
             self._emit(
-                type="llm", step=step, latency=latency, tool_call=bool(tool_calls)
+                type="llm",
+                step=step,
+                latency=latency,
+                tool_call=bool(tool_calls),
+                usage=usage,
             )
             if not tool_calls:
                 answer = msg.content or ""
@@ -59,6 +77,7 @@ class AgentRuntime:
                     )
                 else:
                     result = self.registry.execute(name, arguments)
+                tools_used.append(name)
                 payload = json.dumps(result.to_dict(), ensure_ascii=False)
                 self._emit(
                     type="tool_result",
@@ -75,6 +94,14 @@ class AgentRuntime:
                     }
                 )
 
-        fallback = f"已达到最大执行步数（{self.max_steps}），任务未完成。"
-        self._emit(type="stop", reason="max_steps", max_steps=self.max_steps)
+        summary = "、".join(
+            f"{n}×{tools_used.count(n)}" for n in dict.fromkeys(tools_used)
+        ) or "无"
+        fallback = (
+            f"已达到最大执行步数（{self.max_steps}），任务未完成。"
+            f"已执行的工具调用：{summary}。"
+        )
+        self._emit(
+            type="stop", reason="max_steps", max_steps=self.max_steps, tools_used=tools_used
+        )
         return fallback

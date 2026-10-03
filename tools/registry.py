@@ -20,4 +20,12 @@ class ToolRegistry:
                 success=False,
                 error={"type": "unknown_tool", "message": f"未知工具: {name}"},
             )
+        if tool.permission_level >= 2:
+            return ToolResult(
+                success=False,
+                error={
+                    "type": "permission_denied",
+                    "message": f"工具 {name} 权限级为 Level {tool.permission_level}，v0.1 不提供此类工具的执行",
+                },
+            )
         return tool.execute(arguments)

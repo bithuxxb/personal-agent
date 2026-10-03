@@ -12,11 +12,18 @@ SYSTEM_PROMPT = (
 
 
 def cli_trace(event: dict) -> None:
-    if event["type"] == "tool_call":
+    if event["type"] == "llm":
+        usage = event.get("usage") or {}
+        tokens = usage.get("total_tokens", "?")
+        mark = " → tool_call" if event["tool_call"] else ""
+        print(f"[step {event['step']}] llm · {event['latency']}s · {tokens} tokens{mark}")
+    elif event["type"] == "tool_call":
         args = event["arguments"][:200]
-        print(f"[step {event['step']}] {event['tool']}({args})")
+        print(f"[tool] {event['tool']}({args})")
     elif event["type"] == "tool_result":
         print(f"[tool] result: {event['result'][:200]}")
+    elif event["type"] == "context_trim":
+        print(f"[context] 历史过长已截断，剩余 {event['remaining']} 条")
     elif event["type"] == "stop":
         print(f"[stop] 达到最大步数 {event['max_steps']}")
 

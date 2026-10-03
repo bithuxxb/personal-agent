@@ -893,7 +893,7 @@ v0.1 完成。
 
 系统需要通过以下测试。
 
-所有测试以 Trace 记录为判定依据。前期人工核对 Trace 即可，顺手时再自动化。
+所有测试以 Trace 记录为判定依据。Test 1、2 靠真实模型人工核对；Test 3–7 及路径逃逸、协议边角已实现为自动化契约测试（mock LLM）：`.venv/bin/python tests/acceptance.py`。
 
 ### Test 1
 
