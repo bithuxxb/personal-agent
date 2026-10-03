@@ -7,7 +7,11 @@ SYSTEM_PROMPT = "你是一个个人技术助手，回答简洁准确。"
 
 def main():
     settings = load_settings()
-    llm = LLMClient(api_key=settings.openai_api_key, model=settings.model)
+    llm = LLMClient(
+        api_key=settings.api_key,
+        model=settings.model,
+        base_url=settings.base_url,
+    )
     agent = AgentRuntime(llm, system_prompt=SYSTEM_PROMPT)
 
     print("Personal Agent v0.1（输入 exit 退出）\n")

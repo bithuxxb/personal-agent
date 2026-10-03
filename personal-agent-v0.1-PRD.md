@@ -761,7 +761,8 @@ https://
 例如：
 
 ```text
-OPENAI_API_KEY
+LLM_API_KEY
+LLM_BASE_URL
 MODEL
 MAX_STEPS
 LOG_LEVEL
@@ -774,7 +775,7 @@ SEARCH_API_KEY
 技术选型（已确定）：
 
 - 语言：Python
-- 首个 LLM：OpenAI（Agents SDK 对比重写的前提）
+- 首个 LLM：DeepSeek（OpenAI 兼容协议，通过 LLM_BASE_URL 切换）；v0.7 对比重写时换回 OpenAI + Agents SDK
 - 搜索：初期用 DuckDuckGo（免费、无需 Key）；web_search 通过适配层隔离提供商，日后可换 Tavily 等付费服务
 
 ---
