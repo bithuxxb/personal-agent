@@ -425,6 +425,22 @@ registry.execute(
 }
 ```
 
+输出：
+
+```json
+{
+  "path": "...",
+  "content": "...",
+  "truncated": false,
+  "size_bytes": 12345
+}
+```
+
+限制：
+
+- 单文件最大读取 256 KB，超出部分截断并设置 `truncated: true`。
+- 二进制文件或无法解码为 UTF-8 的文件返回结构化错误。
+
 初期支持：
 
 - TXT
@@ -524,7 +540,11 @@ tool_result
 
 当 Context 过大时：
 
-v0.1 可以先采用简单截断策略。
+v0.1 采用简单截断策略，但必须遵守以下规则：
+
+- 永远保留 system prompt。
+- 以完整消息为粒度截断，不得截断到 tool_call / tool_result 消息对的中间（否则模型 API 会直接报错）。
+- 优先保留最近 N 轮对话（N 可配置，默认 10）。
 
 暂不实现自动总结和复杂 Context Compression。
 
@@ -573,9 +593,12 @@ tool_name
 tool_arguments
 tool_result
 latency
+token_usage
 error
 final_response
 ```
+
+tool_result 可能很大（例如整页网页内容）。Trace 中只保留截断版本（前 2000 字符），完整内容写入独立日志文件，Trace 中记录其文件路径。
 
 一个典型 Trace：
 
@@ -637,6 +660,15 @@ FINAL
 
 Agent Runtime 不应直接崩溃。
 
+处理策略：
+
+| 错误类型 | 重试策略 | 兜底行为 |
+|---|---|---|
+| Timeout | 指数退避，最多 3 次 | 向用户报告请求超时 |
+| Rate Limit | 按 Retry-After 等待，最多 3 次 | 向用户报告限流，建议稍后重试 |
+| Authentication Error | 不重试 | 提示检查 API Key 配置 |
+| Server Error (5xx) | 指数退避，最多 3 次 | 向用户报告模型服务异常 |
+
 ### Tool Error
 
 统一返回：
@@ -663,6 +695,8 @@ MAX_STEPS
 
 必须终止。
 
+终止时必须返回兜底输出：告知用户已达到最大执行步数，并附上目前已收集到的信息，而不是只返回错误。
+
 避免：
 
 ```text
@@ -683,7 +717,7 @@ v0.1 必须遵守最小权限原则。
 
 ### Local File
 
-read_file 只能访问配置允许的目录。
+read_file 只能访问配置允许的目录（白名单机制，仅白名单生效）。
 
 例如：
 
@@ -691,7 +725,12 @@ read_file 只能访问配置允许的目录。
 ~/Documents/AgentWorkspace
 ```
 
-禁止默认访问：
+实现要求：
+
+- 对路径先做 realpath 解析（展开 `~`、解析 `..` 和符号链接），再对解析后的真实路径做白名单前缀校验。
+- 符号链接指向白名单目录之外时，必须拒绝。
+
+以下目录天然不在白名单内，默认不可访问：
 
 ```text
 ~/.ssh
@@ -719,6 +758,13 @@ https://
 
 并阻止访问本地和私有网络地址。
 
+实现要求：
+
+- 仅允许 `http://` 和 `https://`，其他协议（`file://`、`ftp://` 等）一律拒绝。
+- 对域名解析后的 IP 做校验，阻止 localhost、私有网段（10/8、172.16/12、192.168/16）、链路本地地址（169.254/16，含云 metadata 地址）及其他保留地址。
+- 每次重定向后必须重新校验目标 URL 的协议和解析 IP，防止公网 URL 302 跳转到内网地址。
+- IP 校验发生在建立连接时，防止 DNS rebinding（校验通过后在连接阶段解析到不同 IP）。
+
 ---
 
 ## 18. 配置
@@ -737,6 +783,8 @@ SEARCH_API_KEY
 ```
 
 不得将 API Key 写入代码。
+
+注：搜索服务提供商（Tavily / SerpAPI / Bing 等）尚未选型，需在 v0.1 开发前确定。web_search 的实现应通过适配层隔离具体提供商，便于日后切换。
 
 ---
 
@@ -799,6 +847,8 @@ User
 → Answer
 ```
 
+同时实现最小 Trace 骨架（打印每一步的 tool_call 与结果摘要），否则后续里程碑无法调试。
+
 ### Milestone 3
 
 Tool Registry
@@ -825,12 +875,13 @@ Agent Runtime
 
 Observability
 
-实现：
+在 M2 的 Trace 骨架基础上完善：
 
-- Trace
+- 完整 Trace 字段（见 §15）
 - Tool Log
 - Error Log
 - Latency
+- Token Usage
 
 ### Milestone 6
 
@@ -850,6 +901,8 @@ v0.1 完成。
 
 系统需要通过以下测试。
 
+所有测试以 Trace 记录为判定依据。Test 4、5、7 必须实现为自动化测试，其余可先人工核对 Trace。
+
 ### Test 1
 
 输入：
@@ -858,7 +911,7 @@ v0.1 完成。
 
 预期：
 
-不调用 Search。
+Trace 中不出现任何 tool_call。
 
 ### Test 2
 
@@ -868,7 +921,7 @@ v0.1 完成。
 
 预期：
 
-调用 Search。
+Trace 中出现 tool_name = web_search。
 
 ### Test 3
 
@@ -878,7 +931,7 @@ v0.1 完成。
 
 预期：
 
-调用 read_file。
+Trace 中出现 tool_name = read_file，且最终回答基于文件内容。
 
 ### Test 4
 
@@ -888,38 +941,33 @@ v0.1 完成。
 
 预期：
 
-Tool 拒绝。
+read_file 返回结构化权限错误，文件内容不进入 Context，Agent 向用户说明拒绝原因。
 
 ### Test 5
 
-Search API 失败。
+Search API 失败（通过注入故障模拟）。
 
 预期：
 
-Agent 不崩溃。
+Agent 不崩溃，Trace 中记录标准化 Tool Error，最终回复向用户说明失败情况。
 
 ### Test 6
 
-Tool 连续调用。
+输入：
+
+“搜索 <某话题> 的最新消息，并读取搜索结果中第一个链接的内容。”
 
 预期：
 
-能够完成：
-
-```text
-Search
-→ Fetch
-→ Search
-→ Final Answer
-```
+Trace 中依次出现 web_search 和 web_fetch，且最终回答综合了两次工具调用的结果。
 
 ### Test 7
 
-出现无限调用倾向。
+构造诱导无限调用的输入。
 
 预期：
 
-达到 MAX_STEPS 后强制终止。
+达到 MAX_STEPS 后强制终止，返回兜底输出（说明已达上限并附已有信息），Trace 记录终止原因。
 
 ---
 
