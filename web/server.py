@@ -41,6 +41,11 @@ class ChatRequest(BaseModel):
     message: str
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return FileResponse(STATIC_DIR / "favicon.ico")
+
+
 @app.get("/")
 def index():
     return FileResponse(STATIC_DIR / "index.html")

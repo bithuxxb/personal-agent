@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Personal Agent v0.1</title>
+<link rel="icon" href="/favicon.ico">
 <style>
   :root {
     color-scheme: dark;
@@ -66,6 +67,50 @@
     word-break: break-word;
     line-height: 1.55;
   }
+  .msg.agent .body { white-space: normal; }
+  .msg .body p { margin: 0.45em 0; }
+  .msg .body p:first-child { margin-top: 0; }
+  .msg .body p:last-child { margin-bottom: 0; }
+  .msg .body h1, .msg .body h2, .msg .body h3,
+  .msg .body h4, .msg .body h5, .msg .body h6 {
+    margin: 0.8em 0 0.4em;
+    line-height: 1.3;
+  }
+  .msg .body h1 { font-size: 1.25em; }
+  .msg .body h2 { font-size: 1.15em; }
+  .msg .body h3 { font-size: 1.05em; }
+  .msg .body ul, .msg .body ol { margin: 0.35em 0; padding-inline-start: 1.5em; }
+  .msg .body li { margin: 0.2em 0; }
+  .msg .body table {
+    border-collapse: collapse;
+    margin: 0.5em 0;
+    font-size: 0.92em;
+  }
+  .msg .body th, .msg .body td {
+    border: 1px solid var(--border);
+    padding: 0.3em 0.65em;
+    text-align: start;
+  }
+  .msg .body th { background: #1d222c; }
+  .msg .body code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.88em;
+    background: #0d1017;
+    border: 1px solid var(--border);
+    border-radius: 0.25rem;
+    padding: 0.1em 0.35em;
+  }
+  .msg .body pre {
+    background: #0d1017;
+    border: 1px solid var(--border);
+    border-radius: 0.4rem;
+    padding: 0.6rem 0.8rem;
+    overflow-x: auto;
+    margin: 0.5em 0;
+  }
+  .msg .body pre code { background: none; border: none; padding: 0; }
+  .msg .body a { color: var(--accent); }
+  .msg .body hr { border: none; border-top: 1px solid var(--border); margin: 0.7em 0; }
   .msg.user { margin-inline-start: auto; }
   .msg.user .body { background: #1c2637; border-color: #2c3a52; }
   .event {
@@ -141,6 +186,86 @@ const form = document.getElementById('form');
 const input = document.getElementById('msg');
 const sendBtn = document.getElementById('send');
 
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function inlineMd(raw) {
+  return escapeHtml(raw)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+}
+
+function splitRow(line) {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+}
+
+function renderMarkdown(src) {
+  const lines = src.split('\n');
+  const out = [];
+  let para = [];
+  const flushPara = () => {
+    if (para.length) {
+      out.push('<p>' + para.map(inlineMd).join('<br>') + '</p>');
+      para = [];
+    }
+  };
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (/^\s*```/.test(line)) {
+      flushPara();
+      const buf = [];
+      i++;
+      while (i < lines.length && !/^\s*```/.test(lines[i])) { buf.push(escapeHtml(lines[i])); i++; }
+      i++;
+      out.push('<pre><code>' + buf.join('\n') + '</code></pre>');
+      continue;
+    }
+    if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
+      flushPara();
+      const header = splitRow(line);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) { rows.push(splitRow(lines[i])); i++; }
+      let html = '<table><thead><tr>' + header.map((c) => '<th>' + inlineMd(c) + '</th>').join('') + '</tr></thead><tbody>';
+      for (const r of rows) html += '<tr>' + r.map((c) => '<td>' + inlineMd(c) + '</td>').join('') + '</tr>';
+      out.push(html + '</tbody></table>');
+      continue;
+    }
+    const h = line.match(/^(#{1,6})\s+(.*)$/);
+    if (h) {
+      flushPara();
+      out.push('<h' + h[1].length + '>' + inlineMd(h[2]) + '</h' + h[1].length + '>');
+      i++;
+      continue;
+    }
+    if (/^\s*(-{3,}|\*{3,})\s*$/.test(line)) { flushPara(); out.push('<hr>'); i++; continue; }
+    const listMatch = line.match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
+    if (listMatch) {
+      flushPara();
+      const ordered = /^\d/.test(listMatch[2]);
+      const items = [];
+      while (i < lines.length) {
+        const m = lines[i].match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
+        if (!m || /^\d/.test(m[2]) !== ordered) break;
+        items.push(m[3]);
+        i++;
+      }
+      const tag = ordered ? 'ol' : 'ul';
+      out.push('<' + tag + '>' + items.map((t) => '<li>' + inlineMd(t) + '</li>').join('') + '</' + tag + '>');
+      continue;
+    }
+    if (!line.trim()) { flushPara(); i++; continue; }
+    para.push(line);
+    i++;
+  }
+  flushPara();
+  return out.join('\n');
+}
+
 function addMsg(who, text) {
   const div = document.createElement('div');
   div.className = 'msg ' + (who === '你' ? 'user' : 'agent');
@@ -149,7 +274,11 @@ function addMsg(who, text) {
   whoEl.textContent = who;
   const body = document.createElement('div');
   body.className = 'body';
-  body.textContent = text;
+  if (who === 'Agent') {
+    body.innerHTML = renderMarkdown(text);
+  } else {
+    body.textContent = text;
+  }
   div.append(whoEl, body);
   chat.appendChild(div);
   chat.scrollTop = chat.scrollHeight;
