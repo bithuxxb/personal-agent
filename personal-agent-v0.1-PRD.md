@@ -1,4 +1,9 @@
-# Personal Agent v0.1 产品需求文档
+# Personal Agent 产品需求文档
+
+> **实现状态更新**：本文档描述 v0.1 的设计，其中 Runtime/LLM/Registry 曾全部手搓实现并通过验收。
+> 当前代码主线已切换为 **OpenAI Agents SDK 实现**（原 §22 v0.7 的对比重写提前执行）：
+> tool loop、schema 校验、会话历史由 SDK 承担，手搓版代码已删除。
+> 各章节中标注了「SDK 版现状」。保留手搓版的设计描述，作为对比材料。
 
 ## 1. 项目概述
 
@@ -234,7 +239,11 @@ Agent Runtime 是整个系统的核心。
 - 控制执行循环
 - 返回最终答案
 
-基础执行逻辑：
+> **SDK 版现状**：以上职责由 SDK 的 `Runner.run_streamed(..., max_turns=...)` 承担；
+> 达到上限抛 `MaxTurnsExceeded`，由 `trace.py` 捕获并生成兜底输出。
+> 本项目保留的 Runtime 层代码只有 `trace.py`（事件流映射）和 `agent.py`（组装）。
+
+v0.1 手搓版基础执行逻辑（已由 SDK 接管，留档）：
 
 ```text
 step = 0
@@ -281,6 +290,12 @@ LLM 模块负责所有模型通信。
 - Tool Call 解析
 - API Error 处理
 
+> **SDK 版现状**：模型通信由 SDK 的 `Model` 层承担。DeepSeek 只兼容 Chat Completions
+> （`/v1/chat/completions`），未实现 SDK 默认的 Responses API，因此用官方推荐的桥接：
+> `OpenAIChatCompletionsModel(model=..., openai_client=AsyncOpenAI(base_url=...))`。
+> System Prompt 的日期注入通过 SDK dynamic instructions（`instructions` 传函数）实现，
+> 见 `agent.py` 的 `_instructions`。瞬时错误重试由 openai 客户端内建机制承担。
+
 Agent Runtime 不直接依赖具体模型 API。
 
 应该通过统一接口调用：
@@ -322,6 +337,11 @@ Tool
 └── execute()
 ```
 
+> **SDK 版现状**：工具用 `@function_tool` 声明，name/description 来自函数名与 docstring，
+> parameters schema 由 SDK 从类型签名自动生成（pydantic），参数校验由 SDK 在调用前完成——
+> 手搓版的 `Tool` dataclass 和 `validate_arguments` 退役。
+> 工具本体仍是 `tools/` 下的普通 Python 函数，返回 `{success, data|error}` 结构。
+
 ---
 
 ## 10. Tool Registry
@@ -348,6 +368,10 @@ registry.execute(
     arguments
 )
 ```
+
+> **SDK 版现状**：Registry 退役。工具在 `build_agent()` 时直接以列表交给 `Agent`；
+> schema 输出、参数校验、错误标准化（异常不会直接抛给模型）均由 SDK 承担。
+> 安全校验（目录白名单、SSRF）仍在工具函数内部，不依赖框架。
 
 ---
 
@@ -523,6 +547,10 @@ execute_code
 
 v0.1 默认不提供 Level 3 工具。
 
+> **SDK 版现状**：手搓 registry 的 Level≥2 硬拦截已随 registry 退役。
+> 现有工具全部为 Level 0/1，无实际拦截对象；未来引入 Level 2+ 工具时，
+> 使用 SDK 的 tool approval 机制（`needs_approval`）替代自研权限级。
+
 ---
 
 ## 13. Context Management
@@ -550,6 +578,9 @@ tool_result
 v0.1 采用简单截断策略。唯一硬性规则：不得截断到 tool_call / tool_result 消息对的中间，否则模型 API 会直接报错。其余策略（保留几轮、怎么淘汰）在实现中体会后再调整。
 
 暂不实现自动总结和复杂 Context Compression。
+
+> **SDK 版现状**：会话历史由 SDK `SQLiteSession` 持久化（`sessions.db`）并自动回注，
+> 手搓的组粒度截断已删除。SDK 默认不做长度截断——超长上下文如何治理留作后续体验点。
 
 ---
 
@@ -583,6 +614,11 @@ Episodic Memory
 ## 15. Observability
 
 所有 Agent 执行必须产生 Trace。
+
+> **SDK 版现状**：Trace 事件由 `trace.py` 监听 SDK 的 stream 事件
+> （`raw_response_event` / `run_item_stream_event`）映射生成，字段与下表一致，
+> CLI 和 Web 前端不变。SDK 内建 tracing（上报 api.openai.com）已关闭——
+> 它面向 OpenAI 平台，用第三方 key 会 401。
 
 每次请求至少记录：
 
@@ -776,8 +812,9 @@ SEARCH_API_KEY
 技术选型（已确定）：
 
 - 语言：Python
-- 首个 LLM：DeepSeek（OpenAI 兼容协议，通过 LLM_BASE_URL 切换）；v0.7 对比重写时换回 OpenAI + Agents SDK
-- 搜索：初期用 DuckDuckGo（免费、无需 Key）；web_search 通过适配层隔离提供商，日后可换 Tavily 等付费服务
+- Agent 框架：OpenAI Agents SDK（原 v0.7 对比重写提前执行，已成为主线；v0.1 手搓 Runtime 已删除，设计留档于本文档）
+- LLM：DeepSeek（OpenAI Chat Completions 兼容协议，经 `OpenAIChatCompletionsModel` 桥接，通过 LLM_BASE_URL 切换）
+- 搜索：初期用 DuckDuckGo（免费、无需 Key）；web_search 可日后替换为 Tavily 等付费服务
 
 ---
 
@@ -894,7 +931,7 @@ v0.1 完成。
 
 系统需要通过以下测试。
 
-所有测试以 Trace 记录为判定依据。Test 1、2 靠真实模型人工核对；Test 3–7 及路径逃逸、协议边角、参数校验、正文抽取、日期注入等已实现为自动化契约测试（mock LLM）：`.venv/bin/python tests/acceptance.py`。
+所有测试以 Trace 记录为判定依据。Test 1、2 靠真实模型人工核对；Test 3–7 及路径逃逸、SSRF 边角、schema 生成、正文抽取、日期注入、会话持久化等已实现为自动化契约测试（SDK `ScriptedModel` 脚本回放，不依赖真实模型）：`.venv/bin/python tests/acceptance.py`。
 
 ### Test 1
 
@@ -972,8 +1009,8 @@ Trace 中依次出现 web_search 和 web_fetch，且最终回答综合了两次�
 
 - URL Reader 增强
 - Structured Output
-- Conversation Storage
-- SQLite
+- ~~Conversation Storage~~（已由 SDK `SQLiteSession` 顺带获得）
+- ~~SQLite~~（同上）
 
 ### v0.3
 
@@ -1006,7 +1043,7 @@ Trace 中依次出现 web_search 和 web_fetch，且最终回答综合了两次�
 - Browser Automation
 - Computer Use
 
-### v0.7
+### v0.7（已完成，提前执行）
 
 根据复杂度重新评估：
 
@@ -1017,7 +1054,27 @@ Trace 中依次出现 web_search 和 web_fetch，且最终回答综合了两次�
 
 是否需要引入更高级 Agent Framework。
 
-已确定的方向：v0.1 自研 Runtime 跑通后，用 OpenAI Agents SDK 重写一版做对比，亲身体验框架封装了什么、代价是什么。
+**结论：已用 OpenAI Agents SDK 重写为主线。** 对比结论：
+
+SDK 封装掉的（约 400 行手搓代码退役）：
+
+- tool calling 循环与 max_turns 上限（`Runner` + `MaxTurnsExceeded`）
+- 工具 schema 生成与参数运行时校验（`@function_tool` + pydantic）
+- 消息历史管理与持久化（`SQLiteSession`，顺带完成原 v0.2 的对话存储）
+- LLM 瞬时错误重试（openai 客户端内建）
+- usage 统计
+
+仍然自己保留的：
+
+- dynamic instructions 注入真实日期时间（时效性问题，框架不管）
+- 工具安全校验：目录白名单 realpath 判定、SSRF 防护（框架不管业务安全）
+- 正文精简抽取（链接密度过滤、长行去重）
+- 自有 trace 事件流（SDK 内建 tracing 绑死 OpenAI 平台，第三方模型不可用）
+
+失去的观察点：
+
+- context 截断策略不再由自己控制（SDK 默认不截断，超长治理待体验）
+- LLM 重试过程不再逐次入 trace（openai 客户端内部完成）
 
 ---
 

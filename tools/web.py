@@ -5,8 +5,6 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
-from .base import Tool, ToolResult
-
 TIMEOUT = 15
 MAX_REDIRECTS = 5
 MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -126,7 +124,7 @@ class _TextExtractor(HTMLParser):
         return "\n".join(out)
 
 
-def _web_search(query: str) -> ToolResult:
+def web_search(query: str) -> dict:
     try:
         from ddgs import DDGS
 
@@ -136,97 +134,59 @@ def _web_search(query: str) -> ToolResult:
                 for r in ddgs.text(query, max_results=5)
             ]
     except Exception as exc:
-        return ToolResult(
-            success=False, error={"type": "search_error", "message": str(exc)}
-        )
-    return ToolResult(success=True, data={"results": results})
+        return {"success": False, "error": {"type": "search_error", "message": str(exc)}}
+    return {"success": True, "data": {"results": results}}
 
 
-def _web_fetch(url: str) -> ToolResult:
+def web_fetch(url: str) -> dict:
     current = url
     try:
         resp = None
         for _ in range(MAX_REDIRECTS + 1):
             if err := _validate_url(current):
-                return ToolResult(
-                    success=False, error={"type": "url_blocked", "message": err}
-                )
+                return {"success": False, "error": {"type": "url_blocked", "message": err}}
             resp = httpx.get(current, timeout=TIMEOUT, follow_redirects=False)
             if resp.is_redirect:
                 current = urljoin(current, resp.headers["location"])
                 continue
             break
         else:
-            return ToolResult(
-                success=False,
-                error={"type": "too_many_redirects", "message": f"超过 {MAX_REDIRECTS} 次重定向"},
-            )
+            return {
+                "success": False,
+                "error": {"type": "too_many_redirects", "message": f"超过 {MAX_REDIRECTS} 次重定向"},
+            }
 
         if resp.status_code >= 400:
-            return ToolResult(
-                success=False,
-                error={"type": "http_error", "message": f"HTTP {resp.status_code}"},
-            )
+            return {
+                "success": False,
+                "error": {"type": "http_error", "message": f"HTTP {resp.status_code}"},
+            }
         content_type = resp.headers.get("content-type", "")
         if "html" not in content_type:
-            return ToolResult(
-                success=False,
-                error={"type": "non_html", "message": f"非 HTML 内容: {content_type}"},
-            )
+            return {
+                "success": False,
+                "error": {"type": "non_html", "message": f"非 HTML 内容: {content_type}"},
+            }
         if len(resp.content) > MAX_BODY_BYTES:
-            return ToolResult(
-                success=False,
-                error={"type": "too_large", "message": "网页超过 2MB，未读取"},
-            )
+            return {
+                "success": False,
+                "error": {"type": "too_large", "message": "网页超过 2MB，未读取"},
+            }
 
         extractor = _TextExtractor()
         extractor.feed(resp.text)
         content = extractor.text()
         truncated = len(content) > MAX_CONTENT_CHARS
-        return ToolResult(
-            success=True,
-            data={
+        return {
+            "success": True,
+            "data": {
                 "url": str(resp.url),
                 "title": extractor.title,
                 "content": content[:MAX_CONTENT_CHARS],
                 "truncated": truncated,
             },
-        )
+        }
     except httpx.TimeoutException:
-        return ToolResult(
-            success=False,
-            error={"type": "timeout", "message": f"请求超过 {TIMEOUT}s"},
-        )
+        return {"success": False, "error": {"type": "timeout", "message": f"请求超过 {TIMEOUT}s"}}
     except httpx.HTTPError as exc:
-        return ToolResult(
-            success=False, error={"type": "fetch_error", "message": str(exc)}
-        )
-
-
-web_search = Tool(
-    name="web_search",
-    description="根据关键词搜索互联网，返回标题、链接和摘要。用于查询实时信息。",
-    parameters={
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "搜索关键词"}
-        },
-        "required": ["query"],
-    },
-    func=_web_search,
-    permission_level=1,
-)
-
-web_fetch = Tool(
-    name="web_fetch",
-    description="获取指定网页的正文内容。仅支持 http/https，内网地址会被拒绝。",
-    parameters={
-        "type": "object",
-        "properties": {
-            "url": {"type": "string", "description": "要读取的网页 URL"}
-        },
-        "required": ["url"],
-    },
-    func=_web_fetch,
-    permission_level=1,
-)
+        return {"success": False, "error": {"type": "fetch_error", "message": str(exc)}}

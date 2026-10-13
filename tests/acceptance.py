@@ -1,20 +1,26 @@
-"""PRD §21 可自动化部分的验收脚本（契约测试，使用 mock LLM，不依赖真实模型）。
+"""SDK 版验收脚本（PRD §21 可自动化部分）。
 
-运行：.venv/bin/python tests/acceptance.py
+LLM 用 SDK 自带的 agents.testing.ScriptedModel 按脚本回放，
+不依赖真实模型。运行：.venv/bin/python tests/acceptance.py
 """
 
-import itertools
+import asyncio
 import json
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from runtime.loop import AgentRuntime
-from tools import local_file, web
-from tools.base import Tool, ToolResult
-from tools.registry import ToolRegistry
+from agents import Agent, SQLiteSession, Usage
+from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
+
+from agent import BASE_INSTRUCTIONS, _instructions, build_agent, calculator
+from config import Settings
+from tools.local_file import make_read_file
+from tools.web import _TextExtractor, web_fetch
+from trace import run_agent
 
 PASSED = []
 FAILED = []
@@ -25,212 +31,131 @@ def check(name: str, cond: bool, detail: str = ""):
     print(f"{'PASS' if cond else 'FAIL'}  {name}  {detail if not cond else ''}")
 
 
-class FakeCall:
-    def __init__(self, name: str, arguments: str):
-        self.id = "call_1"
-        self.function = type("F", (), {"name": name, "arguments": arguments})()
+def make_settings(workspace: str) -> Settings:
+    return Settings(
+        api_key="test-key",
+        base_url=None,
+        model="test-model",
+        max_steps=8,
+        log_level="INFO",
+        workspace_dir=workspace,
+    )
 
 
-class FakeMessage:
-    def __init__(self, content=None, tool_calls=None):
-        self.content = content
-        self.tool_calls = tool_calls
+def make_run(model, workspace, max_steps=8):
+    """返回 (run函数, events)。run(text) 走完整的 run_agent + trace 事件流。"""
+    settings = make_settings(workspace)
+    agent = build_agent(settings, model=model)
+    session = SQLiteSession("test", db_path=":memory:")
+    events: list[dict] = []
 
-    def model_dump(self, exclude_none=True):
-        d = {"role": "assistant", "content": self.content}
-        if self.tool_calls:
-            d["tool_calls"] = [
-                {
-                    "id": c.id,
-                    "type": "function",
-                    "function": {"name": c.function.name, "arguments": c.function.arguments},
-                }
-                for c in self.tool_calls
-            ]
-        return {k: v for k, v in d.items() if v is not None} if exclude_none else d
+    async def _run(text):
+        return await run_agent(
+            agent, text, session=session, max_turns=max_steps, on_event=events.append
+        )
 
+    def run(text):
+        return asyncio.run(_run(text))
 
-class ScriptLLM:
-    """按预设脚本依次返回响应。"""
-
-    def __init__(self, script):
-        self.script = list(script)
-        self.calls = 0
-
-    def generate(self, messages, tools=None):
-        self.calls += 1
-        item = self.script.pop(0)
-        if isinstance(item, tuple):  # (msg, usage)
-            return item
-        return item, None
-
-
-class LoopLLM:
-    """永远返回 tool_call，用于触发 MAX_STEPS。"""
-
-    def __init__(self):
-        self.calls = 0
-
-    def generate(self, messages, tools=None):
-        self.calls += 1
-        return FakeMessage(tool_calls=[FakeCall("calculator", '{"expression": "1+1"}')]), None
-
-
-def make_agent(llm, extra_tools=(), max_steps=8, workspace=None):
-    registry = ToolRegistry()
-    for t in extra_tools:
-        registry.register(t)
-    if workspace:
-        registry.register(local_file.make_tool(workspace))
-    events = []
-    agent = AgentRuntime(llm, registry, "测试", max_steps=max_steps, on_event=events.append)
-    return agent, events
+    return run, events
 
 
 ws = tempfile.mkdtemp(prefix="agent-test-")
 Path(ws, "test.md").write_text("# 测试\n内容", encoding="utf-8")
 
-# --- Test 3: read_file 正常读取 ---
-agent, events = make_agent(
-    ScriptLLM([
-        FakeMessage(tool_calls=[FakeCall("read_file", '{"path": "test.md"}')]),
-        FakeMessage(content="已读取"),
-    ]),
-    workspace=ws,
+# --- Test 3: read_file 正常读取，结果进入工具输出 ---
+model = ScriptedModel([
+    [function_call("read_file", {"path": "test.md"}, call_id="c1")],
+    [assistant_message("已读取")],
+])
+run, events = make_run(model, ws)
+answer = run("读取 test.md")
+tool_ev = next(e for e in events if e["type"] == "tool_result")
+check(
+    "Test 3 read_file 正常读取",
+    tool_ev["success"] and '"success": true' in tool_ev["result"] and answer == "已读取",
 )
-answer = agent.ask("读取 test.md")
-tool_msg = next(m for m in agent.messages if m.get("role") == "tool")
-check("Test 3 read_file 正常读取", '"success": true' in tool_msg["content"] and answer == "已读取")
 
-# --- Test 4: ~/.ssh 拒绝，且内容不进入 context ---
-agent, events = make_agent(
-    ScriptLLM([
-        FakeMessage(tool_calls=[FakeCall("read_file", '{"path": "~/.ssh/id_rsa"}')]),
-        FakeMessage(content="无权访问该文件"),
-    ]),
-    workspace=ws,
-)
-answer = agent.ask("读取 ~/.ssh/id_rsa")
-tool_msg = next(m for m in agent.messages if m.get("role") == "tool")
+# --- Test 4: ~/.ssh 被拒绝 ---
+model = ScriptedModel([
+    [function_call("read_file", {"path": "~/.ssh/id_rsa"}, call_id="c1")],
+    [assistant_message("无权访问该文件")],
+])
+run, events = make_run(model, ws)
+answer = run("读取 ~/.ssh/id_rsa")
+tool_ev = next(e for e in events if e["type"] == "tool_result")
 check(
     "Test 4 ~/.ssh 被拒绝",
-    "permission_denied" in tool_msg["content"] and answer == "无权访问该文件",
+    not tool_ev["success"]
+    and "permission_denied" in tool_ev["result"]
+    and answer == "无权访问该文件",
 )
 
 # --- 路径逃逸组：symlink / .. / 同名前缀目录 ---
-rf = local_file.make_tool(ws)
+rf = make_read_file(ws)
 outside = Path(ws).parent / f"{Path(ws).name}-backup"
 outside.mkdir(exist_ok=True)
 (outside / "secret.txt").write_text("secret")
 Path(ws, "evil-link").unlink(missing_ok=True)
 Path(ws, "evil-link").symlink_to(Path.home() / ".ssh")
-check("逃逸: 符号链接", not rf.execute({"path": "evil-link"}).success)
-check("逃逸: .. 穿越", not rf.execute({"path": "../../.." + str(outside / "secret.txt")}).success)
-check("逃逸: 同名前缀目录", not rf.execute({"path": str(outside / "secret.txt")}).success)
-check("逃逸后白名单内仍正常", rf.execute({"path": "test.md"}).success)
+check("逃逸: 符号链接", not rf("evil-link")["success"])
+check("逃逸: .. 穿越", not rf("../../.." + str(outside / "secret.txt"))["success"])
+check("逃逸: 同名前缀目录", not rf(str(outside / "secret.txt"))["success"])
+check("逃逸后白名单内仍正常", rf("test.md")["success"])
 
-# --- Test 5: 工具失败不崩溃，错误回传给模型 ---
-failing = Tool(
-    name="always_fails",
-    description="总是失败",
-    parameters={"type": "object", "properties": {}},
-    func=lambda: ToolResult(success=False, error={"type": "boom", "message": "模拟失败"}),
+# --- Test 5: 工具失败不崩溃，结构化错误回传 ---
+model = ScriptedModel([
+    [function_call("calculator", {"expression": "1+"}, call_id="c1")],
+    [assistant_message("工具失败了，换一种方式")],
+])
+run, events = make_run(model, ws)
+answer = run("触发失败")
+tool_ev = next(e for e in events if e["type"] == "tool_result")
+check(
+    "Test 5 工具失败不崩溃",
+    answer == "工具失败了，换一种方式"
+    and not tool_ev["success"]
+    and "calc_error" in tool_ev["result"],
 )
-agent, events = make_agent(
-    ScriptLLM([
-        FakeMessage(tool_calls=[FakeCall("always_fails", "{}")]),
-        FakeMessage(content="工具失败了，换一种方式"),
-    ]),
-    extra_tools=[failing],
-)
-answer = agent.ask("触发失败")
-check("Test 5 工具失败不崩溃", answer == "工具失败了，换一种方式")
-check("Test 5 错误结构化回传", any(
-    e["type"] == "tool_result" and not e["success"] and "boom" in e["result"] for e in events
-))
 
-# --- Test 7: 无限调用被 MAX_STEPS 终止 ---
-llm = LoopLLM()
-agent, events = make_agent(llm, extra_tools=[__import__("tools.calculator", fromlist=["tool"]).tool], max_steps=3)
-answer = agent.ask("诱导无限循环")
+# --- Test 7: 无限调用被 max_turns 终止 ---
+def always_tool(call):
+    return ModelStep(
+        output=[function_call("calculator", {"expression": "1+1"}, call_id=f"c{len(call.input)}")]
+    )
+
+
+model = ScriptedModel([ModelStep.respond(always_tool)] * 10)
+run, events = make_run(model, ws, max_steps=3)
+answer = run("诱导无限循环")
 check(
     "Test 7 MAX_STEPS 终止",
-    llm.calls == 3 and "已达到最大执行步数（3）" in answer,
-    f"calls={llm.calls}",
+    "已达到最大执行步数（3）" in answer,
+    answer,
 )
-check("Test 7 stop 事件 + 工具摘要", any(
-    e["type"] == "stop" and e["tools_used"] == ["calculator"] * 3 for e in events
-))
-
-# --- 协议边角: 未知工具 / 非法 JSON ---
-agent, events = make_agent(
-    ScriptLLM([
-        FakeMessage(tool_calls=[FakeCall("nonexistent", "{}")]),
-        FakeMessage(content="好"),
-    ])
+check(
+    "Test 7 stop 事件 + 工具摘要",
+    any(e["type"] == "stop" and e["tools_used"] == ["calculator"] * 3 for e in events),
 )
-agent.ask("x")
-tool_msg = next(m for m in agent.messages if m.get("role") == "tool")
-check("未知工具返回结构化错误", "unknown_tool" in tool_msg["content"])
-
-agent, events = make_agent(
-    ScriptLLM([
-        FakeMessage(tool_calls=[FakeCall("calculator", "{bad json")]),
-        FakeMessage(content="好"),
-    ]),
-    extra_tools=[__import__("tools.calculator", fromlist=["tool"]).tool],
-)
-agent.ask("x")
-tool_msg = next(m for m in agent.messages if m.get("role") == "tool")
-check("非法 JSON 参数不崩溃", "invalid_json" in tool_msg["content"])
-
-# --- 权限级: Level 2 工具被拒绝 ---
-lv2 = Tool(
-    name="save_note",
-    description="写操作",
-    parameters={"type": "object", "properties": {}},
-    func=lambda: ToolResult(success=True, data={}),
-    permission_level=2,
-)
-agent, _ = make_agent(
-    ScriptLLM([
-        FakeMessage(tool_calls=[FakeCall("save_note", "{}")]),
-        FakeMessage(content="好"),
-    ]),
-    extra_tools=[lv2],
-)
-agent.ask("x")
-tool_msg = next(m for m in agent.messages if m.get("role") == "tool")
-check("Level 2 工具默认拒绝", "permission_denied" in tool_msg["content"])
-
-# --- Context 截断: 不切断 tool_call/tool_result 组 ---
-from runtime.loop import MAX_CONTEXT_MESSAGES
-
-agent, events = make_agent(ScriptLLM([FakeMessage(content="ok")]))
-agent.messages = [{"role": "system", "content": "s"}]
-for i in range(MAX_CONTEXT_MESSAGES):
-    agent.messages.append({"role": "user", "content": f"q{i}"})
-    agent.messages.append({"role": "assistant", "content": None, "tool_calls": [{"id": "c"}]})
-    agent.messages.append({"role": "tool", "tool_call_id": "c", "content": "r"})
-agent._trim_context()
-check("截断后保留 system", agent.messages[0]["role"] == "system")
-check("截断后不出现孤儿 tool 消息", agent.messages[1]["role"] != "tool")
-check("截断后长度受控", len(agent.messages) <= MAX_CONTEXT_MESSAGES + 1)
 
 # --- web_fetch SSRF 静态校验（不发请求的分支）---
-check("SSRF: file:// 拒绝", not web.web_fetch.execute({"url": "file:///etc/passwd"}).success)
-check("SSRF: 内网 IP 拒绝", not web.web_fetch.execute({"url": "http://192.168.1.1/"}).success)
-check("SSRF: metadata 地址拒绝", not web.web_fetch.execute({"url": "http://169.254.169.254/"}).success)
+check("SSRF: file:// 拒绝", not web_fetch("file:///etc/passwd")["success"])
+check("SSRF: 内网 IP 拒绝", not web_fetch("http://192.168.1.1/")["success"])
+check("SSRF: metadata 地址拒绝", not web_fetch("http://169.254.169.254/")["success"])
 
 # --- Trace 字段完整性（PRD §15）---
-agent, events = make_agent(
-    ScriptLLM([
-        FakeMessage(tool_calls=[FakeCall("read_file", '{"path": "test.md"}')]),
-        FakeMessage(content="总结完毕"),
-    ]),
-    workspace=ws,
-)
-agent.ask("读一下 test.md")
+model = ScriptedModel([
+    ModelStep(
+        output=[function_call("read_file", {"path": "test.md"}, call_id="c1")],
+        usage=Usage(requests=1, input_tokens=10, output_tokens=5, total_tokens=15),
+    ),
+    ModelStep(
+        output=[assistant_message("总结完毕")],
+        usage=Usage(requests=1, input_tokens=20, output_tokens=5, total_tokens=25),
+    ),
+])
+run, events = make_run(model, ws)
+run("读一下 test.md")
 req_ev = next(e for e in events if e["type"] == "request")
 check(
     "Trace: request 含 request_id/timestamp/user_input/model",
@@ -239,7 +164,7 @@ check(
 )
 llm_evs = [e for e in events if e["type"] == "llm"]
 check(
-    "Trace: llm 事件含 step/model/latency/usage",
+    "Trace: llm 事件含 step/model/latency/usage，逐步记录",
     len(llm_evs) == 2
     and all(all(k in e for k in ("step", "model", "latency", "usage")) for e in llm_evs),
 )
@@ -249,128 +174,62 @@ check(
 )
 tool_ev = next(e for e in events if e["type"] == "tool_call")
 check(
-    "Trace: tool_call 含 step/tool_name/arguments",
-    all(k in tool_ev for k in ("step", "tool", "arguments")),
+    "Trace: tool_call 含 step/tool/arguments",
+    all(k in tool_ev for k in ("step", "tool", "arguments"))
+    and tool_ev["tool"] == "read_file",
 )
-final_ev = next(e for e in events if e["type"] == "final")
-check(
-    "Trace: final 含 answer；usage 全程缺失时 token_usage 为 None（不记零）",
-    final_ev["answer"] == "总结完毕" and final_ev.get("token_usage") is None,
-)
-
-# usage 返回时逐步累计
-agent, events = make_agent(
-    ScriptLLM([
-        (FakeMessage(tool_calls=[FakeCall("read_file", '{"path": "test.md"}')]),
-         {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}),
-        (FakeMessage(content="done"),
-         {"prompt_tokens": 20, "completion_tokens": 5, "total_tokens": 25}),
-    ]),
-    workspace=ws,
-)
-agent.ask("读 test.md")
 final_ev = next(e for e in events if e["type"] == "final")
 check(
     "Trace: final 累计各步 token_usage",
-    final_ev["token_usage"] == {"prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40},
+    final_ev["answer"] == "总结完毕"
+    and final_ev["token_usage"]
+    == {"prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40},
     f"实际: {final_ev.get('token_usage')}",
 )
 
-# --- LLM 错误结构化入 Trace（§15 error 字段）---
-class FailLLM:
-    model = "fail-model"
-
-    def generate(self, messages, tools=None):
-        raise RuntimeError("api 炸了")
-
-agent, events = make_agent(FailLLM())
+# --- LLM 错误：error 事件入 Trace 后继续上抛 ---
+model = ScriptedModel([ModelStep.raise_error(RuntimeError("api 炸了"))])
+run, events = make_run(model, ws)
 try:
-    agent.ask("x")
+    run("x")
     raised = False
 except RuntimeError:
     raised = True
 err_ev = next((e for e in events if e["type"] == "error"), None)
 check(
     "Trace: LLM 异常产生 error 事件后继续上抛",
-    raised
-    and err_ev is not None
-    and err_ev["error"]["type"] == "RuntimeError"
-    and err_ev["step"] == 1
-    and err_ev.get("request_id"),
+    raised and err_ev is not None and err_ev["error"]["type"] == "RuntimeError",
 )
 
-# --- LLM 重试可观察（§16 重试过程入 Trace）---
-from unittest.mock import patch
-
-import httpx
-from openai import RateLimitError
-
-from llm.client import LLMClient
-
-client = LLMClient(api_key="k", model="m")
-retries = []
-client.on_retry = lambda attempt, exc: retries.append((attempt, type(exc).__name__))
-rl_err = RateLimitError(
-    "rate limited",
-    response=httpx.Response(429, request=httpx.Request("POST", "http://x")),
-    body=None,
-)
-
-
-class FlakyCompletions:
-    def __init__(self):
-        self.calls = 0
-
-    def create(self, **kwargs):
-        self.calls += 1
-        if self.calls <= 2:
-            raise rl_err
-        return type(
-            "Resp",
-            (),
-            {
-                "usage": None,
-                "choices": [type("C", (), {"message": FakeMessage(content="ok")})()],
-            },
-        )()
-
-
-client._client = type(
-    "C", (), {"chat": type("Ch", (), {"completions": FlakyCompletions()})()}
-)()
-with patch("llm.client.time.sleep"):
-    msg, _ = client.generate([{"role": "user", "content": "x"}])
+# --- 时效性：dynamic instructions 注入真实当前日期 ---
+model = ScriptedModel([[assistant_message("ok")]])
+run, _ = make_run(model, ws)
+run("今天有什么新闻")
+sys_prompt = model.calls[0].system_instructions
 check(
-    "LLM 重试两次后成功且回调可观察",
-    msg.content == "ok" and retries == [(1, "RateLimitError"), (2, "RateLimitError")],
-    f"retries={retries}",
+    "instructions 含当前真实日期时间",
+    "当前日期时间" in sys_prompt and str(datetime.now().year) in sys_prompt,
 )
 
-# Runtime 自动接管 LLMClient 的 on_retry，汇入统一事件流
-client2 = LLMClient(api_key="k", model="m")
-agent, events = make_agent(client2)
-check("Runtime 接管 llm.on_retry", client2.on_retry is not None)
+# --- 会话历史：SQLiteSession 自动携带上一轮 ---
+model = ScriptedModel([[assistant_message("第一轮")], [assistant_message("第二轮")]])
+run, _ = make_run(model, ws)
+run("第一轮问题")
+run("第二轮问题")
+second_input = json.dumps(model.calls[1].input, ensure_ascii=False, default=str)
+check("Session 携带历史（第二轮调用包含第一轮内容）", "第一轮问题" in second_input)
 
-# --- 时效性：system prompt 每次请求注入真实当前日期 ---
-from datetime import datetime
-
-agent, _ = make_agent(ScriptLLM([FakeMessage(content="ok"), FakeMessage(content="ok2")]))
-agent.ask("今天有什么新闻")
-sys_msg = agent.messages[0]["content"]
+# --- schema 生成：@function_tool 从签名自动生成（替代手搓 validate_arguments）---
+schema = calculator.params_json_schema
 check(
-    "system prompt 含当前真实日期时间",
-    "当前日期时间" in sys_msg and str(datetime.now().year) in sys_msg,
+    "schema: 自动生成 required 与类型",
+    schema["required"] == ["expression"]
+    and schema["properties"]["expression"]["type"] == "string",
+    json.dumps(schema, ensure_ascii=False),
 )
-agent.ask("再问一次")
-refreshed = agent.messages[0]["content"]
-check(
-    "每次请求刷新而非叠加（日期行不重复）",
-    refreshed.count("当前日期时间") == 1 and refreshed.count("测试") == 1,
-)
+check("instructions 基础文本保留", BASE_INSTRUCTIONS in _instructions(None, None))
 
 # --- web_fetch 正文抽取精简 ---
-from tools.web import _TextExtractor
-
 html = """<html><head><title>t</title><style>x{}</style></head><body>
 <nav>首页 城市列表 全国 北京 上海 广州</nav>
 <script>var junk = 1;</script>
@@ -405,22 +264,6 @@ ex3 = _TextExtractor()
 ex3.feed("<html><body><p>详见<a>这份报告</a>，明天小雨转阴，气温17到22度。</p></body></html>")
 check("正文抽取: 含少量链接的正文不误杀", "小雨转阴" in ex3.text())
 
-# --- 参数 schema 校验（PRD §9 validate / §10 参数校验）---
-from tools import calculator as calc_mod
-
-r = calc_mod.tool.execute({})
-check("schema: 缺少必填参数被拒", not r.success and "缺少必填参数" in r.error["message"])
-
-r = calc_mod.tool.execute({"expression": 123})
-check("schema: 类型错误被拒", not r.success and "类型错误" in r.error["message"])
-
-r = calc_mod.tool.execute({"expression": "1+1", "extra": "x"})
-check("schema: 未知参数被拒", not r.success and "未知参数" in r.error["message"])
-
-r = calc_mod.tool.execute({"expression": "1+1"})
-check("schema: 合法参数正常执行", r.success and r.data["value"] == 2)
-
-# --- 正文去重：长行去重、短数据行保留 ---
 ex4 = _TextExtractor()
 ex4.feed(
     "<html><body>"

@@ -1,14 +1,12 @@
-from config import load_settings
-from llm.client import LLMClient
-from runtime.loop import AgentRuntime
-from tools import calculator, local_file, web
-from tools.registry import ToolRegistry
+import asyncio
 
-SYSTEM_PROMPT = (
-    "你是一个个人技术助手，回答简洁准确。"
-    "需要计算时用 calculator；需要实时信息时用 web_search，"
-    "需要读网页正文时用 web_fetch；需要读本地文件时用 read_file。"
-)
+from agents import SQLiteSession
+
+from agent import build_agent
+from config import load_settings
+from trace import run_agent
+
+SESSION_DB = "sessions.db"
 
 
 def cli_trace(event: dict) -> None:
@@ -19,42 +17,23 @@ def cli_trace(event: dict) -> None:
         tokens = usage.get("total_tokens", "?")
         mark = " → tool_call" if event["tool_call"] else ""
         print(f"[step {event['step']}] llm · {event['latency']}s · {tokens} tokens{mark}")
-    elif event["type"] == "llm_retry":
-        print(f"[retry] LLM 第 {event['attempt']} 次调用失败（{event['error']['type']}），退避后重试")
     elif event["type"] == "tool_call":
-        args = event["arguments"][:200]
+        args = str(event["arguments"])[:200]
         print(f"[tool] {event['tool']}({args})")
     elif event["type"] == "tool_result":
         print(f"[tool] result: {event['result'][:200]}")
-    elif event["type"] == "context_trim":
-        print(f"[context] 历史过长已截断，剩余 {event['remaining']} 条")
     elif event["type"] == "stop":
         print(f"[stop] 达到最大步数 {event['max_steps']}")
     elif event["type"] == "error":
         print(f"[error] step {event.get('step')}: {event['error']['type']}: {event['error']['message']}")
 
 
-def main():
+async def main():
     settings = load_settings()
-    llm = LLMClient(
-        api_key=settings.api_key,
-        model=settings.model,
-        base_url=settings.base_url,
-    )
-    registry = ToolRegistry()
-    registry.register(calculator.tool)
-    registry.register(web.web_search)
-    registry.register(web.web_fetch)
-    registry.register(local_file.make_tool(settings.workspace_dir))
-    agent = AgentRuntime(
-        llm,
-        registry,
-        system_prompt=SYSTEM_PROMPT,
-        max_steps=settings.max_steps,
-        on_event=cli_trace,
-    )
+    agent = build_agent(settings)
+    session = SQLiteSession("cli", db_path=SESSION_DB)
 
-    print("Personal Agent v0.1（输入 exit 退出）\n")
+    print("Personal Agent · SDK 版（输入 exit 退出）\n")
     while True:
         try:
             user_input = input("> ").strip()
@@ -66,7 +45,13 @@ def main():
         if user_input.lower() in ("exit", "quit"):
             break
         try:
-            answer = agent.ask(user_input)
+            answer = await run_agent(
+                agent,
+                user_input,
+                session=session,
+                max_turns=settings.max_steps,
+                on_event=cli_trace,
+            )
         except Exception as exc:
             print(f"[error] {exc}\n")
             continue
@@ -74,4 +59,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
